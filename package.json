@@ -1,0 +1,15 @@
+{
+
+  "name": "idol-mosaic",
+
+  "version": "5.0.0",
+
+  "private": true,
+
+  "dependencies": {
+
+    "@vercel/blob": "^1.1.1"
+
+  }
+
+}
