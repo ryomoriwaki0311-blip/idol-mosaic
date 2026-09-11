@@ -1,0 +1,298 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Idol Mosaic v4</title>
+<style>
+:root{--bg:#0b0d12;--card:#151922;--muted:#939caf;--text:#f7f8fb;--accent:#7798ff;--line:#283040;--good:#9ee6af;--warn:#ffd479;--bad:#ff9c9c}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif}
+.wrap{max-width:760px;margin:auto;padding:18px 16px calc(40px + env(safe-area-inset-bottom))}
+h1{font-size:24px;margin:0 0 5px}.version{font-size:12px;color:var(--muted)}
+.sub,.note,.meta{color:var(--muted);font-size:12px;line-height:1.65}
+.sub{font-size:13px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:16px;margin:13px 0}
+.step{font-weight:800;font-size:17px;margin-bottom:12px}
+.filebox{display:block;border:1px dashed #46526b;border-radius:15px;padding:16px;text-align:center;background:#0f131b;font-weight:700}
+input[type=file]{display:none}
+.stage{position:relative;background:#050608;border-radius:16px;overflow:hidden;min-height:220px;display:grid;place-items:center}
+.hint{color:var(--muted);padding:40px 20px;text-align:center}
+video{display:none;width:100%;max-height:66vh;background:#000}
+canvas{display:none;position:absolute;inset:0;width:100%;height:100%;touch-action:manipulation}
+.seekrow{display:none;margin-top:12px}input[type=range]{width:100%}
+.labels{display:flex;justify-content:space-between;color:var(--muted);font-size:11px}
+.status{margin-top:10px;font-size:13px;line-height:1.5}.good{color:var(--good)}.warn{color:var(--warn)}.bad{color:var(--bad)}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+button{border:0;border-radius:14px;padding:14px;font-size:15px;font-weight:800;background:#242b3a;color:#fff}
+button:disabled{opacity:.4}
+.debug{margin-top:10px;background:#0f131b;border:1px solid var(--line);border-radius:12px;padding:10px;font-size:11px;color:#a7b0c2;white-space:pre-wrap}
+</style>
+</head>
+<body>
+<div class="wrap">
+<h1>アイドル以外モザイク <span class="version">v4</span></h1>
+<div class="sub">追跡ロック強化版。位置だけでなく「見た目の色特徴」も使い、怪しい時は別人へ飛ばず見失い扱いにします。</div>
+
+<section class="card">
+  <div class="step">1. 動画を選ぶ</div>
+  <label class="filebox" for="file">動画を選択</label>
+  <input id="file" type="file" accept="video/*">
+  <div id="meta" class="meta"></div>
+  <div id="model" class="status">AIモデル：読み込み中…</div>
+</section>
+
+<section class="card">
+  <div class="step">2. 残したい人物を選ぶ</div>
+  <div class="stage">
+    <div id="hint" class="hint">動画を選ぶとAIが人物を探します</div>
+    <video id="video" playsinline muted preload="metadata"></video>
+    <canvas id="canvas"></canvas>
+  </div>
+  <div id="seekrow" class="seekrow">
+    <input id="seek" type="range" min="0" max="1000" value="0">
+    <div class="labels"><span>フレーム位置</span><span id="time">0:00</span></div>
+  </div>
+  <div id="target" class="status">まだ指定されていません</div>
+  <div class="row">
+    <button id="play" disabled>▶ 追跡テスト</button>
+    <button id="reset" disabled>指定やり直し</button>
+  </div>
+  <div class="note">青枠＝候補。残したい人物の枠内をタップ。緑＝追跡中、黄＝見失い中。</div>
+</section>
+
+<section class="card">
+  <div class="step">3. 追跡状態</div>
+  <div id="track" class="status">人物を選ぶと追跡します。</div>
+  <div id="debug" class="debug">score: -</div>
+  <div class="note">v4では誤追跡を避けるため、一定以上の一致度がない候補には乗り換えません。</div>
+</section>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow/tfjs@4.22.0/dist/tf.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/@tensorflow-models/coco-ssd@2.2.3/dist/coco-ssd.min.js"></script>
+<script>
+const q=id=>document.getElementById(id);
+const file=q('file'),video=q('video'),canvas=q('canvas'),ctx=canvas.getContext('2d');
+const hint=q('hint'),meta=q('meta'),modelEl=q('model'),seek=q('seek'),seekrow=q('seekrow'),timeEl=q('time');
+const targetEl=q('target'),play=q('play'),reset=q('reset'),track=q('track'),debug=q('debug');
+
+let mdl=null,dets=[],target=null,url=null,busy=false,tracking=false,last=0;
+let lostCount=0;
+let appearanceRef=null;
+
+const ft=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+
+async function load(){
+  try{
+    await tf.ready();
+    mdl=await cocoSsd.load({base:'lite_mobilenet_v2'});
+    modelEl.innerHTML='<span class="good">AIモデル：準備完了 ✓</span>';
+    if(video.readyState>=2) detect();
+  }catch(e){
+    modelEl.innerHTML='<span class="bad">AIモデル読み込み失敗</span>';
+    console.error(e);
+  }
+}
+load();
+
+function fit(){
+  const r=video.getBoundingClientRect();
+  canvas.width=Math.max(1,Math.round(r.width*devicePixelRatio));
+  canvas.height=Math.max(1,Math.round(r.height*devicePixelRatio));
+}
+
+function cvbox(b){
+  const vw=video.videoWidth,vh=video.videoHeight,cw=canvas.width,ch=canvas.height;
+  if(!vw||!vh)return null;
+  const vr=vw/vh,cr=cw/ch;
+  let dw,dh,ox=0,oy=0;
+  if(vr>cr){dw=cw;dh=cw/vr;oy=(ch-dh)/2}
+  else{dh=ch;dw=ch*vr;ox=(cw-dw)/2}
+  return{x:ox+b[0]/vw*dw,y:oy+b[1]/vh*dh,w:b[2]/vw*dw,h:b[3]/vh*dh}
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  dets.forEach((d,i)=>{
+    const b=cvbox(d.bbox); if(!b)return;
+    const isT=target&&target.det===d;
+    ctx.strokeStyle=isT?(lostCount>0?'#ffd479':'#9ee6af'):'#7798ff';
+    ctx.lineWidth=(isT?5:3)*devicePixelRatio;
+    ctx.strokeRect(b.x,b.y,b.w,b.h);
+    ctx.fillStyle=ctx.strokeStyle;
+    ctx.font=`${12*devicePixelRatio}px sans-serif`;
+    ctx.fillText(isT?(lostCount>0?'再捕捉候補':'残す人物'):`人物 ${i+1}`,b.x+4,b.y+14*devicePixelRatio);
+  });
+}
+
+function iou(a,b){
+  const x1=Math.max(a[0],b[0]),y1=Math.max(a[1],b[1]),x2=Math.min(a[0]+a[2],b[0]+b[2]),y2=Math.min(a[1]+a[3],b[1]+b[3]);
+  const inter=Math.max(0,x2-x1)*Math.max(0,y2-y1),u=a[2]*a[3]+b[2]*b[3]-inter;
+  return u?inter/u:0
+}
+
+function sampleAppearance(bbox){
+  if(video.readyState<2)return null;
+  const off=document.createElement('canvas');
+  const ow=32,oh=48; off.width=ow; off.height=oh;
+  const oc=off.getContext('2d',{willReadFrequently:true});
+  let [x,y,w,h]=bbox;
+  // avoid head/background edges: torso-biased crop
+  const cx=x+w*0.18, cy=y+h*0.18, cw=w*0.64, ch=h*0.68;
+  try{
+    oc.drawImage(video,cx,cy,cw,ch,0,0,ow,oh);
+    const d=oc.getImageData(0,0,ow,oh).data;
+    const hist=new Array(24).fill(0);
+    let count=0;
+    for(let i=0;i<d.length;i+=4){
+      const r=d[i],g=d[i+1],b=d[i+2];
+      const max=Math.max(r,g,b),min=Math.min(r,g,b);
+      const v=max/255, s=max===0?0:(max-min)/max;
+      let hval=0;
+      if(max!==min){
+        if(max===r) hval=((g-b)/(max-min))%6;
+        else if(max===g) hval=(b-r)/(max-min)+2;
+        else hval=(r-g)/(max-min)+4;
+        hval=(hval*60+360)%360;
+      }
+      const hb=Math.min(7,Math.floor(hval/45));
+      const sb=Math.min(2,Math.floor(s*3));
+      hist[hb*3+sb]++; count++;
+    }
+    return hist.map(v=>v/Math.max(1,count));
+  }catch(e){return null}
+}
+
+function histSim(a,b){
+  if(!a||!b)return 0;
+  let bc=0;
+  for(let i=0;i<a.length;i++) bc+=Math.sqrt(a[i]*b[i]);
+  return Math.max(0,Math.min(1,bc));
+}
+
+function match(prev,people){
+  if(!prev||!people.length)return {det:null,score:-9,app:0,pos:0,ov:0};
+  const pc=[prev[0]+prev[2]/2,prev[1]+prev[3]/2];
+  let best=null,bestScore=-9,bestApp=0,bestPos=0,bestIou=0;
+  for(const d of people){
+    const c=[d.bbox[0]+d.bbox[2]/2,d.bbox[1]+d.bbox[3]/2];
+    const dist=Math.hypot((c[0]-pc[0])/video.videoWidth,(c[1]-pc[1])/video.videoHeight);
+    const pos=Math.max(0,1-dist*2.5);
+    const ov=iou(prev,d.bbox);
+    const app=histSim(appearanceRef,sampleAppearance(d.bbox));
+    const sizeRatio=Math.min(d.bbox[2]*d.bbox[3],prev[2]*prev[3])/Math.max(1,Math.max(d.bbox[2]*d.bbox[3],prev[2]*prev[3]));
+    const score=app*0.52 + pos*0.22 + ov*0.18 + sizeRatio*0.08;
+    if(score>bestScore){bestScore=score;best=d;bestApp=app;bestPos=pos;bestIou=ov}
+  }
+  return {det:best,score:bestScore,app:bestApp,pos:bestPos,ov:bestIou};
+}
+
+async function detect(){
+  if(!mdl||busy||video.readyState<2)return;
+  busy=true;
+  try{
+    const p=(await mdl.detect(video,20,0.34)).filter(x=>x.class==='person');
+    const prev=target?.box?[...target.box]:null;
+    dets=p;
+    if(target&&prev){
+      const m=match(prev,p);
+      debug.textContent=`score: ${m.score.toFixed(2)} / appearance: ${m.app.toFixed(2)} / position: ${m.pos.toFixed(2)} / iou: ${m.ov.toFixed(2)}`;
+      // stricter when already lost
+      const threshold=lostCount>0?0.66:0.58;
+      const appearanceFloor=lostCount>0?0.58:0.50;
+      if(m.det && m.score>=threshold && m.app>=appearanceFloor){
+        target={det:m.det,box:[...m.det.bbox]};
+        // slowly update appearance only while confident
+        const fresh=sampleAppearance(m.det.bbox);
+        if(fresh && m.score>0.72 && appearanceRef){
+          appearanceRef=appearanceRef.map((v,i)=>v*0.88+fresh[i]*0.12);
+        }
+        lostCount=0;
+        track.innerHTML='<span class="good">✓ 同じ人物を追跡中</span>';
+      }else{
+        lostCount++;
+        // never attach target.det to a dubious person
+        target={det:null,box:prev};
+        track.innerHTML=`<span class="warn">見失い中… 自動で再捕捉を待っています (${lostCount})</span>`;
+      }
+    }
+    draw();
+  }catch(e){console.error(e)}
+  busy=false;
+}
+
+file.onchange=()=>{
+  const f=file.files?.[0];if(!f)return;
+  if(url)URL.revokeObjectURL(url);
+  url=URL.createObjectURL(f);video.src=url;
+  target=null;dets=[];appearanceRef=null;lostCount=0;
+  play.disabled=reset.disabled=true;
+  meta.textContent=f.name;
+  video.onloadedmetadata=()=>{
+    video.currentTime=Math.min(.2,video.duration||0);
+    meta.textContent=`${f.name} / ${ft(video.duration||0)} / ${video.videoWidth}×${video.videoHeight}`;
+    seekrow.style.display='block'
+  };
+  video.onseeked=async()=>{
+    hint.style.display='none';video.style.display='block';canvas.style.display='block';
+    fit();await detect();timeEl.textContent=ft(video.currentTime||0)
+  }
+}
+
+seek.oninput=()=>{
+  if(!video.duration)return;
+  video.pause();tracking=false;play.textContent='▶ 追跡テスト';
+  video.currentTime=Number(seek.value)/1000*video.duration
+}
+
+canvas.onpointerdown=e=>{
+  const r=canvas.getBoundingClientRect(),px=(e.clientX-r.left)/r.width*canvas.width,py=(e.clientY-r.top)/r.height*canvas.height;
+  let ch=null,area=Infinity;
+  for(const d of dets){
+    const b=cvbox(d.bbox);
+    if(px>=b.x&&px<=b.x+b.w&&py>=b.y&&py<=b.y+b.h&&b.w*b.h<area){ch=d;area=b.w*b.h}
+  }
+  if(ch){
+    appearanceRef=sampleAppearance(ch.bbox);
+    target={det:ch,box:[...ch.bbox]};
+    lostCount=0;
+    targetEl.innerHTML='<span class="good">✓ 残す人物をロックしました</span>';
+    track.innerHTML='<span class="good">追跡準備OK。再生して確認できます。</span>';
+    debug.textContent='score: 初期特徴を保存済み';
+    play.disabled=reset.disabled=false;
+    draw()
+  }
+}
+
+reset.onclick=()=>{
+  target=null;appearanceRef=null;lostCount=0;
+  targetEl.textContent='まだ指定されていません';
+  track.textContent='人物を選び直してください。';
+  debug.textContent='score: -';
+  play.disabled=reset.disabled=true;draw()
+}
+
+play.onclick=async()=>{
+  if(!target)return;
+  if(video.paused){tracking=true;await video.play();play.textContent='⏸ 停止'}
+  else{tracking=false;video.pause();play.textContent='▶ 追跡テスト'}
+}
+
+video.ontimeupdate=()=>{
+  if(video.duration)seek.value=Math.round(video.currentTime/video.duration*1000);
+  timeEl.textContent=ft(video.currentTime||0)
+}
+
+video.onended=()=>{tracking=false;play.textContent='▶ 追跡テスト'}
+
+async function loop(ts){
+  if(tracking&&!video.paused&&mdl&&!busy&&ts-last>220){last=ts;await detect()}
+  requestAnimationFrame(loop)
+}
+requestAnimationFrame(loop);
+
+window.onresize=()=>{if(video.style.display==='block'){fit();draw()}}
+</script>
+</body>
+</html>
