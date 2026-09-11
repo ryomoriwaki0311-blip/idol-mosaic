@@ -1,0 +1,183 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Idol Mosaic v2</title>
+<style>
+:root{--bg:#0b0d12;--card:#151922;--muted:#939caf;--text:#f7f8fb;--accent:#7798ff;--line:#283040;--good:#9ee6af}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,"Hiragino Sans","Yu Gothic",sans-serif}
+.wrap{max-width:760px;margin:auto;padding:18px 16px calc(40px + env(safe-area-inset-bottom))}
+header{margin:4px 2px 18px} h1{font-size:24px;margin:0 0 5px}.version{font-size:12px;color:var(--muted)}
+.sub{font-size:13px;color:var(--muted);line-height:1.55}
+.card{background:var(--card);border:1px solid var(--line);border-radius:20px;padding:16px;margin:13px 0}
+.step{display:flex;gap:10px;align-items:center;font-size:17px;font-weight:800;margin-bottom:13px}
+.badge{width:30px;height:30px;border-radius:50%;background:var(--accent);display:grid;place-items:center;color:#fff;font-size:14px}
+.filebox{display:block;border:1px dashed #46526b;border-radius:15px;padding:16px;text-align:center;background:#0f131b;font-weight:700}
+input[type=file]{display:none}
+.meta{margin-top:10px;font-size:12px;line-height:1.6;color:var(--muted);word-break:break-all}
+.stage{position:relative;background:#050608;border-radius:16px;overflow:hidden;min-height:220px;display:grid;place-items:center}
+video{display:none;width:100%;max-height:66vh;background:#000}
+canvas{display:none;position:absolute;inset:0;width:100%;height:100%;touch-action:manipulation}
+.hint{padding:40px 20px;color:var(--muted);text-align:center;line-height:1.6}
+.seekrow{display:none;margin-top:12px} input[type=range]{width:100%}
+.seeklabels{display:flex;justify-content:space-between;color:var(--muted);font-size:11px}
+.target{margin-top:10px;font-size:13px;color:#cfd6e5}.good{color:var(--good)}
+button{border:0;border-radius:14px;padding:14px 15px;font-size:15px;font-weight:800}
+.primary{background:var(--accent);color:#fff;width:100%}.secondary{background:#242b3a;color:#fff;width:100%;margin-top:10px}
+button:disabled{opacity:.4}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.opt{display:block;border:1px solid var(--line);border-radius:14px;padding:14px;background:#0f131b;font-weight:700}.opt input{margin-right:8px}
+.select{width:100%;background:#0f131b;border:1px solid var(--line);color:#fff;border-radius:14px;padding:14px;font-size:15px}
+.note{font-size:12px;color:var(--muted);line-height:1.65;margin-top:10px}
+.status{display:none}.progressShell{height:12px;border-radius:999px;background:#252c3a;overflow:hidden;margin:12px 0 8px}
+.progressBar{height:100%;width:0;background:var(--accent);transition:width .25s ease}
+.statusline{display:flex;justify-content:space-between;gap:12px;font-size:13px}.pct{color:var(--muted)}
+.log{margin-top:10px;background:#0b0f16;border:1px solid var(--line);border-radius:12px;padding:10px;font-size:11px;color:#9aa5ba;line-height:1.55;max-height:110px;overflow:auto;white-space:pre-wrap}
+.result{display:none}.resultBox{border:1px solid var(--line);background:#0f131b;border-radius:15px;padding:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>アイドル以外モザイク <span class="version">v2</span></h1>
+  <div class="sub">AI処理接続前の完成UI版。残す人物を指定して、処理条件を確認できます。</div>
+</header>
+
+<section class="card">
+  <div class="step"><span class="badge">1</span>動画を選ぶ</div>
+  <label class="filebox" for="file">動画を選択</label>
+  <input id="file" type="file" accept="video/*">
+  <div id="meta" class="meta"></div>
+</section>
+
+<section class="card">
+  <div class="step"><span class="badge">2</span>残したいアイドルをタップ</div>
+  <div class="stage">
+    <div id="hint" class="hint">動画を選ぶとフレームを表示します</div>
+    <video id="video" playsinline muted preload="metadata"></video>
+    <canvas id="canvas"></canvas>
+  </div>
+  <div id="seekrow" class="seekrow">
+    <input id="seek" type="range" min="0" max="1000" value="0">
+    <div class="seeklabels"><span>フレーム位置</span><span id="timeLabel">0:00</span></div>
+  </div>
+  <div id="targetInfo" class="target">まだ指定されていません</div>
+  <button id="resetTarget" class="secondary" disabled>指定をやり直す</button>
+</section>
+
+<section class="card">
+  <div class="step"><span class="badge">3</span>モザイク方法</div>
+  <div class="grid2">
+    <label class="opt"><input type="radio" name="mode" value="face" checked>顔だけ</label>
+    <label class="opt"><input type="radio" name="mode" value="body">全身</label>
+  </div>
+</section>
+
+<section class="card">
+  <div class="step"><span class="badge">4</span>出力設定</div>
+  <select id="quality" class="select">
+    <option value="720">軽量 720p</option>
+    <option value="1080" selected>標準 1080p</option>
+    <option value="source">元動画に近い画質</option>
+  </select>
+  <div class="note">本番では長尺・4K動画は1080pへ変換して処理を安定させます。</div>
+</section>
+
+<section class="card">
+  <div class="step"><span class="badge">5</span>処理</div>
+  <button id="process" class="primary" disabled>この設定で処理する</button>
+  <div id="status" class="status">
+    <div class="progressShell"><div id="bar" class="progressBar"></div></div>
+    <div class="statusline"><span id="statusText">準備中…</span><span id="pct" class="pct">0%</span></div>
+    <div id="log" class="log"></div>
+  </div>
+  <div class="note">v2では進捗UIまで実装。次に実AI処理サーバーへ接続します。</div>
+</section>
+
+<section id="result" class="card result">
+  <div class="step"><span class="badge">6</span>完成動画</div>
+  <div class="resultBox">処理完了後、ここにプレビューとMP4保存ボタンを表示します。</div>
+</section>
+</div>
+
+<script>
+const $=id=>document.getElementById(id);
+const file=$('file'),video=$('video'),canvas=$('canvas'),ctx=canvas.getContext('2d');
+const hint=$('hint'),meta=$('meta'),seek=$('seek'),seekrow=$('seekrow'),timeLabel=$('timeLabel');
+const targetInfo=$('targetInfo'),resetTarget=$('resetTarget'),process=$('process');
+const status=$('status'),bar=$('bar'),pct=$('pct'),statusText=$('statusText'),log=$('log'),result=$('result');
+let objectUrl=null,target=null;
+
+const fmtSize=n=>n<1048576?(n/1024).toFixed(1)+' KB':(n/1048576).toFixed(1)+' MB';
+const fmtTime=s=>`${Math.floor(s/60)}:${String(Math.floor(s%60)).padStart(2,'0')}`;
+
+function fitCanvas(){
+  const r=video.getBoundingClientRect();
+  canvas.width=Math.max(1,Math.round(r.width*devicePixelRatio));
+  canvas.height=Math.max(1,Math.round(r.height*devicePixelRatio));
+}
+function drawTarget(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  if(!target)return;
+  const x=target.x*canvas.width,y=target.y*canvas.height,r=24*devicePixelRatio;
+  ctx.strokeStyle='#7798ff';ctx.lineWidth=4*devicePixelRatio;
+  ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.stroke();
+  ctx.fillStyle='rgba(119,152,255,.18)';ctx.beginPath();ctx.arc(x,y,r,0,Math.PI*2);ctx.fill();
+}
+file.addEventListener('change',()=>{
+  const f=file.files?.[0]; if(!f)return;
+  if(objectUrl)URL.revokeObjectURL(objectUrl);
+  objectUrl=URL.createObjectURL(f); video.src=objectUrl;
+  target=null; process.disabled=true; resetTarget.disabled=true; targetInfo.textContent='まだ指定されていません';
+  meta.textContent=`${f.name} / ${fmtSize(f.size)}`;
+  video.onloadedmetadata=()=>{
+    video.currentTime=Math.min(.15,video.duration||0);
+    meta.textContent=`${f.name} / ${fmtSize(f.size)} / ${fmtTime(video.duration||0)} / ${video.videoWidth}×${video.videoHeight}`;
+    seekrow.style.display='block';
+  };
+  video.onseeked=()=>{
+    hint.style.display='none';video.style.display='block';canvas.style.display='block';
+    requestAnimationFrame(()=>{fitCanvas();drawTarget()});
+    timeLabel.textContent=fmtTime(video.currentTime||0);
+  };
+});
+seek.addEventListener('input',()=>{
+  if(!video.duration)return;
+  video.currentTime=(Number(seek.value)/1000)*video.duration;
+  timeLabel.textContent=fmtTime(video.currentTime);
+});
+canvas.addEventListener('pointerdown',e=>{
+  const r=canvas.getBoundingClientRect();
+  target={x:(e.clientX-r.left)/r.width,y:(e.clientY-r.top)/r.height};
+  drawTarget();targetInfo.innerHTML='<span class="good">✓ 残す人物を指定しました</span>';
+  resetTarget.disabled=false;process.disabled=false;
+});
+resetTarget.addEventListener('click',()=>{
+  target=null;drawTarget();targetInfo.textContent='まだ指定されていません';resetTarget.disabled=true;process.disabled=true;
+});
+process.addEventListener('click',()=>{
+  status.style.display='block';result.style.display='none';process.disabled=true;
+  const steps=[
+    [8,'動画を準備中…','動画情報を確認'],
+    [22,'人物検出を準備中…','人物検出モデルへ送信予定'],
+    [40,'残す人物を追跡中…','タップ位置を追跡ターゲットに設定'],
+    [62,'他の人物へモザイク中…','選択したモードでマスク作成'],
+    [82,'動画を書き出し中…','MP4エンコード'],
+    [100,'UIテスト完了','次版で実AIサーバーへ接続']
+  ];
+  let i=0;log.textContent='';
+  const run=()=>{
+    const [p,t,l]=steps[i];
+    bar.style.width=p+'%';pct.textContent=p+'%';statusText.textContent=t;
+    log.textContent+=(log.textContent?'\n':'')+'• '+l;
+    i++;
+    if(i<steps.length)setTimeout(run,650);
+    else setTimeout(()=>{result.style.display='block';process.disabled=false;},400);
+  }; run();
+});
+window.addEventListener('resize',()=>{if(video.style.display==='block'){fitCanvas();drawTarget()}});
+</script>
+</body>
+</html>
